@@ -21,3 +21,5 @@ LID_MAX_AREA
 MATCH_THRESHOLD
 
 are the major tunable parameters, currently we have a lot of FN in the outcome, so next aim is to improve the number of detections and make sure they are right, we dont want more of FP. And the angle detection part remains as well 
+
+For estimating the angle, the estimate_angle() function takes the contour as input and fits ellipse to them and then gives the angle of the major axis and the ellipse objest as output. The find_lids_in_tray() function calls this function to calculate the angle along with the centre coordinated of the circle fit to the lid, it appends all these values in a list 'lids' and returns it, the function detect_circles_tray_n_angles() calls this find_lids_in_tray(), modifies the coordinated of the centre according to the full image and appends all the values in the detections array and returns that. In the main run() function we get the detections from the detect_circles_tray_n_angles() function and then calculate the angle errors using the circular_angle_error() function and append these values to the angle_errors array and report the mean of this as the MAE error in angle detection.
