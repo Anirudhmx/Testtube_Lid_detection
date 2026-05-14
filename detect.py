@@ -6,13 +6,14 @@ import matplotlib.pyplot as plt
 
 IMAGES_DIR   = "images/"
 ANNOTATIONS  = "annotations.csv"
-VISUALIZE_DETECTED = 1
+VISUALIZE_DETECTED = 0
 
 TRAY_THRESHOLD  = 80    # Pixels darker than this = tray (increase if tray not found)
 LID_THRESHOLD   = 87    # Pixels brighter than this inside tray = lid (tune this most)
 LID_MIN_AREA    = 400   # Ignore blobs smaller than this (noise)
-LID_MAX_AREA    = 1000  # Ignore blobs larger than this (tray artifacts)
+LID_MAX_AREA    = 1600  # Ignore blobs larger than this (tray artifacts)
 MATCH_THRESHOLD = 20    # Max pixel distance to count a prediction as correct
+BLOCKSIZE = 277
 
  
 def find_tray(cropped):
@@ -20,7 +21,7 @@ def find_tray(cropped):
     gray    = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 1)
  
-    _, dark_thresh = cv2.threshold(blurred, TRAY_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+    _, dark_thresh = cv2.threshold(blurred, TRAY_THRESHOLD, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(dark_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
  
     if not contours:
@@ -45,7 +46,15 @@ def find_lids_in_tray(tray_crop):
     gray    = cv2.cvtColor(tray_crop, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 1)
  
-    _, lid_thresh = cv2.threshold(blurred, LID_THRESHOLD, 255, cv2.THRESH_BINARY)
+    # _, lid_thresh = cv2.threshold(blurred, LID_THRESHOLD, 255, cv2.THRESH_BINARY)
+    lid_thresh = cv2.adaptiveThreshold(
+        blurred,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        blockSize=BLOCKSIZE,   # local region size — must be odd, tune this
+        C=-14           # lids must be this much brighter than local average
+    )
  
     # Remove small noise
     kernel = np.ones((3, 3), np.uint8)
@@ -55,10 +64,18 @@ def find_lids_in_tray(tray_crop):
     # cv2.drawContours(tray_crop, contours,0,0000)
     # cv2.imshow("contour",tray_crop)
     # cv2.waitKey(0)
- 
+    h, w = tray_crop.shape[:2]
     lids = []
     for contour in contours:
         area = cv2.contourArea(contour)
+
+        # Check if contour touches the tray boundary
+        x, y, cw, ch = cv2.boundingRect(contour)
+        touches_edge  = (x <= 2 or y <= 2 or x + cw >= w - 2 or y + ch >= h - 2)
+        # Allow smaller area for edge lids since they are partially cut off
+        min_area = LID_MIN_AREA // 2 if touches_edge else LID_MIN_AREA
+        if area < LID_MIN_AREA or area > LID_MAX_AREA:
+            continue
         if area < LID_MIN_AREA or area > LID_MAX_AREA:
             continue
  
@@ -243,6 +260,104 @@ def show_image(image, gt_centers, detections, title):
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
+def diagnose(image_path, gt_centers):
+    """Show threshold image + contours with area labels to understand misses."""
+    image = cv2.imread(image_path)
+    h, w  = image.shape[:2]
+
+    crop_x  = w // 2
+    cropped = image[0 : h // 2, crop_x : w]
+
+    gray    = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 1)
+
+    _, dark_thresh = cv2.threshold(blurred, TRAY_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+    contours, _    = cv2.findContours(dark_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    tray_contour   = max(contours, key=cv2.contourArea)
+    tx, ty, tw, th = cv2.boundingRect(tray_contour)
+
+    tray_crop = cropped[ty : ty + th, tx : tx + tw]
+    tray_gray = cv2.cvtColor(tray_crop, cv2.COLOR_BGR2GRAY)
+    tray_blur = cv2.GaussianBlur(tray_gray, (5, 5), 1)
+
+    _, lid_thresh = cv2.threshold(tray_blur, LID_THRESHOLD, 255, cv2.THRESH_BINARY)
+    kernel        = np.ones((3, 3), np.uint8)
+    lid_thresh    = cv2.morphologyEx(lid_thresh, cv2.MORPH_OPEN, kernel)
+
+    all_contours, _ = cv2.findContours(lid_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    vis = tray_crop.copy()
+
+    for contour in all_contours:
+        area = cv2.contourArea(contour)
+        M    = cv2.moments(contour)
+        if M["m00"] == 0:
+            continue
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+
+        if LID_MIN_AREA < area < LID_MAX_AREA:
+            # Passing filter — green
+            cv2.drawContours(vis, [contour], -1, (0, 255, 0), 2)
+            cv2.putText(vis, str(int(area)), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        else:
+            # Failing filter — red, with area label so you know why
+            cv2.drawContours(vis, [contour], -1, (0, 0, 255), 2)
+            cv2.putText(vis, str(int(area)), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+
+    # Draw GT centers shifted into tray crop coordinates
+    for gx, gy in gt_centers:
+        gx_local = gx - crop_x - tx
+        gy_local = gy - ty
+        cv2.circle(vis, (int(gx_local), int(gy_local)), 6, (255, 255, 0), 2)  # yellow = GT
+
+    # Also show the raw threshold image
+    cv2.imshow("threshold", lid_thresh)
+    cv2.imshow("contours + GT", vis)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+# function to save the images annotated with the detections from the script
+# def save_detections(image_path, gt_centers, detections, output_dir="detections"):
+#     """Save image with GT (yellow) and predictions (green/red) marked to output folder."""
+    
+#     os.makedirs(output_dir, exist_ok=True)
+    
+#     image = cv2.imread(image_path)
+#     vis   = image.copy()
+
+#     # Draw GT centers in yellow
+#     for gx, gy in gt_centers:
+#         cv2.circle(vis, (int(gx), int(gy)), 8, (0, 255, 255), 2)
+
+#     # Draw predictions — green if matched to a GT, red if not
+#     pred_centers = [(x, y) for x, y, r, a in detections]
+#     matched_gt   = set()
+#     matched_pred = set()
+
+#     for pred_idx, (px, py) in enumerate(pred_centers):
+#         best_dist = float("inf")
+#         best_idx  = -1
+#         for i, (gx, gy) in enumerate(gt_centers):
+#             if i in matched_gt:
+#                 continue
+#             dist = np.sqrt((px - gx) ** 2 + (py - gy) ** 2)
+#             if dist < best_dist:
+#                 best_dist = dist
+#                 best_idx  = i
+#         if best_dist <= MATCH_THRESHOLD and best_idx >= 0:
+#             matched_gt.add(best_idx)
+#             matched_pred.add(pred_idx)
+
+#     for pred_idx, (px, py, r, a) in enumerate(detections):
+#         color = (0, 255, 0) if pred_idx in matched_pred else (0, 0, 255)  # green = TP, red = FP
+#         cv2.circle(vis, (int(px), int(py)), int(r), color, 2)
+#         cv2.circle(vis, (int(px), int(py)), 3, color, -1)
+
+#     filename    = os.path.basename(image_path)
+#     output_path = os.path.join(output_dir, filename)
+#     cv2.imwrite(output_path, vis)
+
 def run():
     annotations = pd.read_csv(ANNOTATIONS)
     # image_files = sorted([f for f in os.listdir(IMAGES_DIR) if f.endswith(".png")])
@@ -315,9 +430,9 @@ def run():
     print(f"  Total images   : {len(image_files)}")
     print(f"  Total tubes : {total_tp + total_fn}")
     print(f"  TP , FP , FN   : {total_tp} , {total_fp} , {total_fn}")
-    print(f"  Precision      : {precision}")
-    print(f"  Recall         : {recall}")
-    print(f"  F1 Score       : {f1}")
+    print(f"  Precision      : {precision:.4f}")
+    print(f"  Recall         : {recall:.4f}")
+    print(f"  F1 Score       : {f1:.4f}")
     print(f"  Angle MAE (degrees)  : {angle_mae} ")
     print("*" * 50)
     # checking the variation of the angle error values
