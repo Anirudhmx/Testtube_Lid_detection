@@ -52,11 +52,11 @@ Detections are matched to ground truth using a **distance threshold** (if the pr
 
 | Metric | Value |
 |--------|-------|
-| TP / FP / FN | 259 / 14 / 112 |
-| Precision | 0.949 |
-| Recall | 0.698 |
-| F1 Score | 0.804 |
-| Angle MAE | 11.23° |
+| TP / FP / FN | 322 / 22 / 49 |
+| Precision | 0.9360 |
+| Recall | 0.8679 |
+| F1 Score | 0.9007 |
+| Angle MAE | 15.44° |
 
 ---
 
@@ -85,6 +85,6 @@ The adaptive threshold `blockSize` and `C` values were tuned by running a sweep 
 
 ## Next Steps
 
-- Improve recall — 112 tubes are still being missed, mostly due to tray detection failures on tricky backgrounds
+- Improve recall — 49 tubes are still being missed, mostly due to tray detection failures on tricky backgrounds
 - Better angle estimation — resolve the 180° ambiguity properly by detecting the tab end of the lid shape
 - Explore learning-based detection (e.g. fine-tuned YOLO) for more robustness across varied conditions
